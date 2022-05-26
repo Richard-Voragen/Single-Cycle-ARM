@@ -239,7 +239,7 @@ module decode(input  logic [1:0] Op,
               output logic [2:0] ALUControl,
               output logic Lower8Bit);
 
-  logic [10:0] controls;
+  logic [9:0] controls;
   logic       Branch, ALUOp;
 
   //```````````````````````
@@ -248,20 +248,23 @@ module decode(input  logic [1:0] Op,
   always_comb
   	casex(Op)
   	                        // Data processing immediate
-  	  2'b00: if (Funct[5])  controls = 11'b00001010010; 
+  	  2'b00: if (Funct[5])  controls = 10'b0000101001; 
   	                        // Data processing register
-  	         else           controls = 11'b00000010010; 
+  	         else           controls = 10'b0000001001; 
   	                        // LDR
-  	  2'b01: if (Funct[0])  controls = 11'b00011110000; 
-  	                        // STR
-  	         else           controls = 11'b10011101000; 
-  	                        // B
-  	  2'b10:                controls = 11'b01101000100; 
+  	  2'b01: if (Funct[0])  controls = 10'b0001111000; 
                             // LDRB
-      2'b11:                controls = 11'b00011110001;
+             if (Funct[2])  Lower8Bit = 1;
+  	                        // STR
+  	         else           controls = 10'b1001110100; 
+  	                        // B
+  	  2'b10:                controls = 10'b0110100010; 
+                            // LDRB
+      2'b11:                controls = 10'b0001111000;
   	                        // Unimplemented
-  	  default:              controls = 11'bx;          
+  	  default:              controls = 10'bx;          
   	endcase
+    if 
 
   assign {RegSrc, ImmSrc, ALUSrc, MemtoReg, 
           RegW, MemW, Branch, ALUOp, Lower8Bit} = controls; 
