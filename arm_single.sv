@@ -25,9 +25,11 @@
 //                  [20]:    S (1 = update CPSR status Flags)
 //   Instr[19:16] = rn (register number)
 //   Instr[15:12] = rd (register destination)
-//   Instr[11:8]  = 0000
+//   Instr[11:8]  = 0000 
+//   Instr[11:7]  = Shift Amount (if Register)
+//   Instr[6:5]   = Shift Direction (if Register) 01 for right, 10 for left
 //   Instr[7:0]   = imm8      (for #immediate type) / 
-//                  {0000,rm} (for register type)
+//                  {0000,rm} (for register type) 
 //   
 // Load/Store instructions
 //   LDR, STR
