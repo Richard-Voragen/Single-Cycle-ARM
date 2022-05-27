@@ -21,7 +21,7 @@
 //                  [25]:    1 for immediate, 0 for register
 //                  [24:21]: 0100 (ADD) / 0010 (SUB) /
 //                           0000 (AND) / 1100 (ORR) / 
-//                           0001 (EOR)
+//                           0001 (EOR) / 0011 (CMP)
 //                  [20]:    S (1 = update CPSR status Flags)
 //   Instr[19:16] = rn (register number)
 //   Instr[15:12] = rd (register destination)
@@ -60,10 +60,10 @@
 //   Instr[31:28] = cond
 //   Instr[27:25] = op = 11
 //   Instr[25:20] = funct
-//                  [25:24] 01 (Right shift)
-//                  [25:24] 10 (Left shift)
-//                  [23] 1:Register 0:Immediate
-//                  [23:20] 0000
+//                  [25]:   1 for immediate, 0 for register
+//                  [24:23] 01 (Right shift)
+//                  [24:23] 10 (Left shift)
+//                  [22:20] 000
 //   Instr[19:16] = rn
 //   Instr[15:12] = rd
 //   Instr[11:5] = 000000
@@ -198,17 +198,17 @@ module arm(input  logic        clk, reset,
   logic [3:0] ALUFlags;
   logic       RegWrite, 
               ALUSrc, MemtoReg, PCSrc;
-  logic [1:0] RegSrc, ImmSrc;
+  logic [1:0] RegSrc, ImmSrc, ShiftDirection;
   logic [2:0] ALUControl;
   logic Lower8Bit;
 
   controller c(clk, reset, Instr[31:12], ALUFlags, 
-               RegSrc, RegWrite, ImmSrc, 
+               RegSrc, RegWrite, ImmSrc, ShiftDirection,
                ALUSrc, ALUControl,
                MemWrite, MemtoReg, PCSrc, Lower8Bit);
 
   datapath dp(clk, reset, 
-              RegSrc, RegWrite, ImmSrc,
+              RegSrc, RegWrite, ImmSrc, ShiftDirection,
               ALUSrc, ALUControl,
               MemtoReg, PCSrc,
               ALUFlags, PC, Instr,
@@ -225,20 +225,20 @@ module controller(input  logic         clk, reset,
                   input  logic [3:0]   ALUFlags,
                   output logic [1:0]   RegSrc,
                   output logic         RegWrite,
-                  output logic [1:0]   ImmSrc,
+                  output logic [1:0]   ImmSrc, ShiftDirection,
                   output logic         ALUSrc, 
                   output logic [2:0]   ALUControl,
                   output logic         MemWrite, MemtoReg,
                   output logic         PCSrc, Lower8Bit);
 
   logic [1:0] FlagW;
-  logic       PCS, RegW, MemW;
+  logic       PCS, RegW, MemW, NoWrite;
   
   decode dec(Instr[27:26], Instr[25:20], Instr[15:12],
              FlagW, PCS, RegW, MemW,
-             MemtoReg, ALUSrc, ImmSrc, RegSrc, ALUControl, Lower8Bit);
+             MemtoReg, ALUSrc, ImmSrc, RegSrc, ShiftDirection, ALUControl, Lower8Bit, NoWrite);
   condlogic cl(clk, reset, Instr[31:28], ALUFlags,
-               FlagW, PCS, RegW, MemW,
+               FlagW, PCS, RegW, MemW, NoWrite,
                PCSrc, RegWrite, MemWrite);
 endmodule
 
@@ -249,9 +249,9 @@ module decode(input  logic [1:0] Op,
               output logic [1:0] FlagW,
               output logic       PCS, RegW, MemW,
               output logic       MemtoReg, ALUSrc,
-              output logic [1:0] ImmSrc, RegSrc,
+              output logic [1:0] ImmSrc, RegSrc, ShiftDirection,
               output logic [2:0] ALUControl,
-              output logic Lower8Bit);
+              output logic Lower8Bit, NoWrite);
 
   logic [9:0] controls;
   logic       Branch, ALUOp, L8B;
@@ -271,8 +271,10 @@ module decode(input  logic [1:0] Op,
              else           controls = 10'b1001110100;
   	                        // B
   	  2'b10:                controls = 10'b0110100010;
-                            // LSL LSR
-      2'b11:                controls = 10'b0001111000;
+                            // LSL LSR Immediate
+      2'b11: if (Funct[5])  controls = 10'b0000101000;
+                            // LSL LSR Register
+             else           controls = 10'b0000001000;
   	                        // Unimplemented
   	  default:              controls = 10'bx;          
   	endcase
@@ -291,6 +293,7 @@ module decode(input  logic [1:0] Op,
         4'b0000: ALUControl = 3'b110; // AND
   	    4'b1100: ALUControl = 3'b111; // ORR
         4'b0001: ALUControl = 3'b010; // XOR
+        4'b0011: ALUControl = 3'b101; // CMP
   	    default: ALUControl = 3'bx;  // unimplemented
       endcase
       // update flags if S bit is set 
@@ -299,12 +302,24 @@ module decode(input  logic [1:0] Op,
 	// FlagW[0] = S-bit & (ADD | SUB)
       FlagW[0]      = Funct[0] & 
         (ALUControl == 3'b100 | ALUControl == 3'b101);
+
+      if (ALUOp == 4'b0011) begin
+        FlagW = 2'b11; 
+        NoWrite = 0;
+      end else NoWrite = 1;
     end else begin
       ALUControl = 3'b100; // add for non-DP instructions
       FlagW      = 2'b00; // don't update Flags
+      $display(Op);
       if (Op == 2'b01) begin
         if (Funct[2]) L8B = 1;
-        else L8B = 0;
+      end else if (Op == 2'b11) begin
+        $display(Op);
+        if (Funct[3]) ShiftDirection = 2'b01;
+        else ShiftDirection = 2'b10;
+      end else begin
+        L8B = 0;
+        ShiftDirection = 2'b00;
       end
     end
               
@@ -320,7 +335,7 @@ module condlogic(input  logic       clk, reset,
                  input  logic [3:0] Cond,
                  input  logic [3:0] ALUFlags,
                  input  logic [1:0] FlagW,
-                 input  logic       PCS, RegW, MemW,
+                 input  logic       PCS, RegW, MemW, NoWrite,
                  output logic       PCSrc, RegWrite, MemWrite);
                  
   logic [1:0] FlagWrite;
@@ -337,9 +352,9 @@ module condlogic(input  logic       clk, reset,
   //
   condcheck cc(Cond, Flags, CondEx);
   assign FlagWrite = FlagW & {2{CondEx}};
-  assign RegWrite  = RegW  & CondEx;
-  assign MemWrite  = MemW  & CondEx;
-  assign PCSrc     = PCS   & CondEx;
+  assign RegWrite  = RegW  & CondEx & NoWrite;
+  assign MemWrite  = MemW  & CondEx & NoWrite;
+  assign PCSrc     = PCS   & CondEx & NoWrite;
 endmodule    
 
 //```````````````````````````````````````````````````````````````
@@ -377,7 +392,7 @@ endmodule
 module datapath(input  logic        clk, reset,
                 input  logic [1:0]  RegSrc,
                 input  logic        RegWrite,
-                input  logic [1:0]  ImmSrc,
+                input  logic [1:0]  ImmSrc, ShiftDirection,
                 input  logic        ALUSrc,
                 input  logic [2:0]  ALUControl,
                 input  logic        MemtoReg,
@@ -428,8 +443,14 @@ module datapath(input  logic        clk, reset,
   end
   shifter     shft(WriteData, shiftData[6:2], shiftData[1:0], WDataOut);
   mux2 #(32)  srcbmux(WDataOut, ExtImm, ALUSrc, SrcB);
+
+  logic [31:0] ALURes, SHFTRes;
+  shifter     lsLR(SrcA, SrcB[4:0], ShiftDirection, SHFTRes);
+
   alu         alu(SrcA, SrcB, ALUControl, 
-                  ALUResult, ALUFlags);
+                  ALURes, ALUFlags);
+
+  mux2 #(32)  ALUorSHFT(ALURes, SHFTRes, (ShiftDirection[1] | ShiftDirection[0]), ALUResult);
 endmodule
 
 //```````````````````````````````````````````````````````````````
@@ -486,14 +507,10 @@ module shifter(input logic [31:0] RD2,
     if (shiftAmt[2] == 1) shift += 4;
     if (shiftAmt[3] == 1) shift += 8;
     if (shiftAmt[4] == 1) shift += 16;
-    $display(shift);
-    $display(shiftDir);
   end
 
   always_comb begin
     if (shiftDir[0] == 1) begin
-      $display(shift);
-      $display(shiftAmt);
       for (int i = 31; i >= 0; i = i - 1) begin
         if (i + shift > 31) RD2Out[i] = 1'b0;
         else RD2Out[i] = RD2[i + shift];
