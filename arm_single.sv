@@ -56,6 +56,20 @@
 //   Instr[23:0]  = imm24 (sign extend, shift left 2)
 //   Note: no Branch delay slot on ARM
 //
+// Shift instructions
+//   Instr[31:28] = cond
+//   Instr[27:25] = op = 11
+//   Instr[25:20] = funct
+//                  [25:24] 01 (Right shift)
+//                  [25:24] 10 (Left shift)
+//                  [23] 1:Register 0:Immediate
+//                  [23:20] 0000
+//   Instr[19:16] = rn
+//   Instr[15:12] = rd
+//   Instr[11:5] = 000000
+//   Instr[4:0] = Imm5
+//                [0] + Reg
+//
 // Other:
 //   R15 reads as PC+8
 //   Conditional Encoding
@@ -108,11 +122,11 @@ module testbench();
   always @(negedge clk)
     begin
       if(MemWrite) begin
-        if(DataAdr === 100 & WriteData === 7) begin
+        if(DataAdr === 128 && WriteData === 254) begin
           $display("Simulation succeeded");
           $stop;
         end else if (DataAdr !== 96) begin
-          $display("Simulation failed");
+          //$display("Simulation failed");
           //$stop;
         end
       end
@@ -166,7 +180,7 @@ module imem(input  logic [31:0] a,
   logic [31:0] RAM[63:0];
 
   initial
-      $readmemh("memfile2.dat",RAM);
+      $readmemh("memfile3.dat",RAM);
 
   assign rd = RAM[a[31:2]]; // word aligned
 endmodule
@@ -240,7 +254,7 @@ module decode(input  logic [1:0] Op,
               output logic Lower8Bit);
 
   logic [9:0] controls;
-  logic       Branch, ALUOp;
+  logic       Branch, ALUOp, L8B;
 
   //```````````````````````
   // Main Decoder
@@ -248,26 +262,23 @@ module decode(input  logic [1:0] Op,
   always_comb
   	casex(Op)
   	                        // Data processing immediate
-  	  2'b00: if (Funct[5])  controls = 10'b0000101001; 
+  	  2'b00: if (Funct[5])  controls = 10'b0000101001;
   	                        // Data processing register
-  	         else           controls = 10'b0000001001; 
+  	         else           controls = 10'b0000001001;
   	                        // LDR
   	  2'b01: if (Funct[0])  controls = 10'b0001111000; 
-                            // LDRB
-             if (Funct[2])  Lower8Bit = 1;
-  	                        // STR
-  	         else           controls = 10'b1001110100; 
+                            // STR
+             else           controls = 10'b1001110100;
   	                        // B
-  	  2'b10:                controls = 10'b0110100010; 
+  	  2'b10:                controls = 10'b0110100010;
                             // LDRB
       2'b11:                controls = 10'b0001111000;
   	                        // Unimplemented
   	  default:              controls = 10'bx;          
   	endcase
-    if 
 
   assign {RegSrc, ImmSrc, ALUSrc, MemtoReg, 
-          RegW, MemW, Branch, ALUOp, Lower8Bit} = controls; 
+          RegW, MemW, Branch, ALUOp} = controls; 
           
   //```````````````````````
   // ALU Decoder             
@@ -279,7 +290,7 @@ module decode(input  logic [1:0] Op,
   	    4'b0010: ALUControl = 3'b101; // SUB
         4'b0000: ALUControl = 3'b110; // AND
   	    4'b1100: ALUControl = 3'b111; // ORR
-        4'b0001: ALUControl = 3'b000; // XOR
+        4'b0001: ALUControl = 3'b010; // XOR
   	    default: ALUControl = 3'bx;  // unimplemented
       endcase
       // update flags if S bit is set 
@@ -291,12 +302,17 @@ module decode(input  logic [1:0] Op,
     end else begin
       ALUControl = 3'b100; // add for non-DP instructions
       FlagW      = 2'b00; // don't update Flags
+      if (Op == 2'b01) begin
+        if (Funct[2]) L8B = 1;
+        else L8B = 0;
+      end
     end
               
   //```````````````````````
   // PC Logic
   //
   assign PCS  = ((Rd == 4'b1111) & RegW) | Branch; 
+  assign Lower8Bit = L8B;
 endmodule
 
 //```````````````````````````````````````````````````````````````
@@ -383,25 +399,35 @@ module datapath(input  logic        clk, reset,
   adder #(32) pcadd1(PC, 32'b100, PCPlus4);
   adder #(32) pcadd2(PCPlus4, 32'b100, PCPlus8);
 
+  // Shorten bits if needed
+  logic [31:0] shortReadData, ReadDataMUXOut;
+  always_comb begin
+    if (ALUResult[1:0] == 2'b00) shortReadData = {24'b0, ReadData[7: 0]};
+    else if (ALUResult[1:0] == 2'b01) shortReadData = {24'b0, ReadData[15: 8]};
+    else if (ALUResult[1:0] == 2'b10) shortReadData = {24'b0, ReadData[23: 16]};
+    else shortReadData = {24'b0, ReadData[31: 24]};
+  end
+  mux2 #(32)  outmux(ReadData, shortReadData, Lower8Bit, ReadDataMUXOut);
+
   // register file logic
   mux2 #(4)   ra1mux(Instr[19:16], 4'b1111, RegSrc[0], RA1);
   mux2 #(4)   ra2mux(Instr[3:0], Instr[15:12], RegSrc[1], RA2);
   regfile     rf(clk, RegWrite, RA1, RA2,
                  Instr[15:12], Result, PCPlus8, 
                  SrcA, WriteData); 
-  mux2 #(32)  resmux(ALUResult, ReadData, MemtoReg, Result);
-
-  logic[31:0] temp; 
-  always_comb begin
-    temp = ReadData;
-    if (Lower8Bit) temp = {24'b0, temp[7:0]};
-  end
-  assign ReadData = temp;
+  mux2 #(32)  resmux(ALUResult, ReadDataMUXOut, MemtoReg, Result);
 
   extend      ext(Instr[23:0], ImmSrc, ExtImm, 1'b0);
 
   // ALU logic
-  mux2 #(32)  srcbmux(WriteData, ExtImm, ALUSrc, SrcB);
+  logic [31:0] WDataOut;
+  logic [6:0] shiftData;
+  always_comb begin
+    if (ALUControl[1] == 0) shiftData = Instr[11:5];
+    else shiftData = 7'b0000000;
+  end
+  shifter     shft(WriteData, shiftData[6:2], shiftData[1:0], WDataOut);
+  mux2 #(32)  srcbmux(WDataOut, ExtImm, ALUSrc, SrcB);
   alu         alu(SrcA, SrcB, ALUControl, 
                   ALUResult, ALUFlags);
 endmodule
@@ -445,6 +471,43 @@ module extend(input  logic [23:0] Instr,
       2'b10:   ExtImm = {{6{Instr[23]}}, Instr[23:0], 2'b00}; 
       default: ExtImm = 32'bx; // undefined
     endcase             
+endmodule
+
+//```````````````````````````````````````````````````````````````
+module shifter(input logic [31:0] RD2,
+               input logic [4:0] shiftAmt,
+               input logic [1:0] shiftDir,
+               output logic [31:0] RD2Out);
+  int shift;
+  always_comb begin
+    shift = 0;
+    if (shiftAmt[0] == 1) shift += 1;
+    if (shiftAmt[1] == 1) shift += 2;
+    if (shiftAmt[2] == 1) shift += 4;
+    if (shiftAmt[3] == 1) shift += 8;
+    if (shiftAmt[4] == 1) shift += 16;
+    $display(shift);
+    $display(shiftDir);
+  end
+
+  always_comb begin
+    if (shiftDir[0] == 1) begin
+      $display(shift);
+      $display(shiftAmt);
+      for (int i = 31; i >= 0; i = i - 1) begin
+        if (i + shift > 31) RD2Out[i] = 1'b0;
+        else RD2Out[i] = RD2[i + shift];
+      end
+    end else if (shiftDir[1] == 1) begin
+      for (int i = 0; i < 32; i = i + 1) begin
+        if (i - shift < 0) RD2Out[i] = 1'b0;
+        else RD2Out[i] = RD2[i - shift];
+      end
+    end else begin
+      RD2Out = RD2;
+    end
+  end
+
 endmodule
 
 //```````````````````````````````````````````````````````````````
